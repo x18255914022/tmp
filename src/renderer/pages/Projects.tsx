@@ -9,7 +9,9 @@ interface Props {
 export default function Projects({ onNavigate, onRefresh }: Props) {
   const [projects, setProjects] = useState<any[]>([]);
   const [showForm, setShowForm] = useState(false);
-  const [form, setForm] = useState({ name: '', description: '', projectType: '', priority: 'средний', defaultBatchSize: 48 });
+  const PROJECT_TYPE_OPTIONS = ['популяционный мониторинг', 'промысловая', 'научная', 'контроль качества'];
+
+  const [form, setForm] = useState({ name: '', description: '', projectType: PROJECT_TYPE_OPTIONS[0], priority: 'средний', defaultBatchSize: 48, defaultLociCount: 10 });
 
   const load = () => window.api.getProjects().then(setProjects);
   useEffect(() => { load(); }, []);
@@ -17,7 +19,7 @@ export default function Projects({ onNavigate, onRefresh }: Props) {
   const handleCreate = async () => {
     if (!form.name.trim()) return;
     await window.api.createProject(form);
-    setForm({ name: '', description: '', projectType: '', priority: 'средний', defaultBatchSize: 48 });
+    setForm({ name: '', description: '', projectType: PROJECT_TYPE_OPTIONS[0], priority: 'средний', defaultBatchSize: 48, defaultLociCount: 10 });
     setShowForm(false);
     load();
   };
@@ -56,12 +58,15 @@ export default function Projects({ onNavigate, onRefresh }: Props) {
             </div>
             <div>
               <label className="block text-xs text-muted-foreground mb-1">Тип</label>
-              <input
+              <select
                 value={form.projectType}
                 onChange={e => setForm({ ...form, projectType: e.target.value })}
                 className="w-full px-3 py-1.5 text-sm rounded border border-border bg-background focus:outline-none focus:ring-1 focus:ring-primary"
-                placeholder="Промысловая, научная..."
-              />
+              >
+                {PROJECT_TYPE_OPTIONS.map((option) => (
+                  <option key={option} value={option}>{option}</option>
+                ))}
+              </select>
             </div>
             <div>
               <label className="block text-xs text-muted-foreground mb-1">Приоритет</label>
@@ -81,6 +86,16 @@ export default function Projects({ onNavigate, onRefresh }: Props) {
                 type="number"
                 value={form.defaultBatchSize}
                 onChange={e => setForm({ ...form, defaultBatchSize: parseInt(e.target.value) || 48 })}
+                className="w-full px-3 py-1.5 text-sm rounded border border-border bg-background focus:outline-none focus:ring-1 focus:ring-primary"
+              />
+            </div>
+            <div>
+              <label className="block text-xs text-muted-foreground mb-1">Локусов по умолчанию</label>
+              <input
+                type="number"
+                min={1}
+                value={form.defaultLociCount}
+                onChange={e => setForm({ ...form, defaultLociCount: parseInt(e.target.value) || 10 })}
                 className="w-full px-3 py-1.5 text-sm rounded border border-border bg-background focus:outline-none focus:ring-1 focus:ring-primary"
               />
             </div>

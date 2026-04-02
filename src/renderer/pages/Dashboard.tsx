@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { BarChart3, CheckCircle2, AlertTriangle, Clock } from 'lucide-react';
+import { BarChart3, CheckCircle2, AlertTriangle, Clock, PauseCircle } from 'lucide-react';
 import StatusBadge from '../components/StatusBadge';
 
 interface Props {
@@ -32,7 +32,7 @@ export default function Dashboard({ onNavigate }: Props) {
 
   if (!stats) return <div className="text-muted-foreground">Загрузка...</div>;
 
-  const { totalProjects, totalBatches, totalBl, dnaCompleted, pcrCompleted, pcrRepeat, electroCompleted, electroRepeat, ready, problems, problemList, readyList } = stats;
+  const { totalProjects, totalBatches, totalBl, dnaCompleted, pcrCompleted, pcrRepeat, electroCompleted, electroRepeat, ready, problems, partialCount, problemList, readyList } = stats;
 
   return (
     <div className="max-w-5xl space-y-6">
@@ -64,6 +64,10 @@ export default function Dashboard({ onNavigate }: Props) {
 
       {/* Repeat/problem counts */}
       <div className="flex gap-4 text-sm">
+        <div className="flex items-center gap-2 bg-slate-50 dark:bg-slate-900/20 rounded-lg px-3 py-2 border border-slate-200 dark:border-slate-800">
+          <PauseCircle size={14} className="text-slate-500" />
+          <span>Не начато / частично: <strong>{partialCount}</strong></span>
+        </div>
         <div className="flex items-center gap-2 bg-amber-50 dark:bg-amber-900/20 rounded-lg px-3 py-2 border border-amber-200 dark:border-amber-800">
           <AlertTriangle size={14} className="text-amber-500" />
           <span>Повтор ПЦР: <strong>{pcrRepeat}</strong></span>
@@ -95,6 +99,7 @@ export default function Dashboard({ onNavigate }: Props) {
                   <th className="text-left px-3 py-2 text-xs text-muted-foreground font-medium">ДНК</th>
                   <th className="text-left px-3 py-2 text-xs text-muted-foreground font-medium">ПЦР</th>
                   <th className="text-left px-3 py-2 text-xs text-muted-foreground font-medium">Форез</th>
+                  <th className="text-left px-3 py-2 text-xs text-muted-foreground font-medium">Тип повтора</th>
                 </tr>
               </thead>
               <tbody>
@@ -106,6 +111,7 @@ export default function Dashboard({ onNavigate }: Props) {
                     <td className="px-3 py-1.5"><StatusBadge status={row.dna_status} type="dna" /></td>
                     <td className="px-3 py-1.5"><StatusBadge status={row.pcr_status} type="pcr" /></td>
                     <td className="px-3 py-1.5"><StatusBadge status={row.electrophoresis_status} type="electro" /></td>
+                    <td className="px-3 py-1.5"><StatusBadge status={row.repeat_type} type="repeat" /></td>
                   </tr>
                 ))}
               </tbody>

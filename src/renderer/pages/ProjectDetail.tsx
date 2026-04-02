@@ -60,6 +60,7 @@ export default function ProjectDetail({ projectId, onNavigate, onRefresh }: Prop
             {project.project_type && <span>{project.project_type}</span>}
             <span>Приоритет: {project.priority}</span>
             <span>Размер выборки: {project.default_batch_size}</span>
+            <span>Локусов (план): {project.default_loci_count || 10}</span>
           </div>
         </div>
       </div>
@@ -114,7 +115,7 @@ export default function ProjectDetail({ projectId, onNavigate, onRefresh }: Prop
             <button onClick={handleCreate} className="px-4 py-1.5 bg-primary text-primary-foreground rounded text-sm hover:opacity-90">Создать</button>
             <button onClick={() => setShowForm(false)} className="px-4 py-1.5 bg-muted text-foreground rounded text-sm hover:opacity-80">Отмена</button>
           </div>
-          <p className="text-[10px] text-muted-foreground">При создании выборки автоматически создаются записи для всех 10 локусов из справочника.</p>
+          <p className="text-[10px] text-muted-foreground">При создании выборки автоматически создаются записи для всех локусов из текущего справочника.</p>
         </div>
       )}
 
