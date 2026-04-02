@@ -9,8 +9,15 @@ interface Props {
 const statusLabels: Record<string, string> = {
   not_started: 'Не начато',
   completed: 'Выполнено',
-  pcr_repeat_needed: 'Повтор ПЦР',
-  electrophoresis_repeat_needed: 'Повтор фореза',
+  pcr_repeat_needed: 'Повтор ПЦР нужен',
+  pcr_repeat_performed: 'Повтор ПЦР выполнен',
+  electrophoresis_repeat_needed: 'Повтор фореза нужен',
+  electrophoresis_repeat_performed: 'Повтор фореза выполнен',
+  NONE: 'Нет',
+  PCR_REPEAT_NEEDED: 'ПЦР: нужен повтор',
+  PCR_REPEAT_PERFORMED: 'ПЦР: повтор выполнен',
+  ELECTROPHORESIS_REPEAT_NEEDED: 'Форез: нужен повтор',
+  ELECTROPHORESIS_REPEAT_PERFORMED: 'Форез: повтор выполнен',
   problem: 'Проблема',
 };
 
@@ -38,6 +45,7 @@ export default function ExportBackup({ onRefresh }: Props) {
         'ДНК': statusLabels[r.dna_status] || r.dna_status,
         'ПЦР': statusLabels[r.pcr_status] || r.pcr_status,
         'Электрофорез': statusLabels[r.electrophoresis_status] || r.electrophoresis_status,
+        'Тип повтора': statusLabels[r.repeat_type] || r.repeat_type,
         'Готово к расчётам': r.ready_for_calculations ? 'Да' : 'Нет',
         'Примечания': r.notes || '',
         'Обновлено': r.updated_at || '',
@@ -47,7 +55,7 @@ export default function ExportBackup({ onRefresh }: Props) {
       // Set column widths
       ws['!cols'] = [
         { wch: 20 }, { wch: 15 }, { wch: 10 }, { wch: 14 }, { wch: 14 },
-        { wch: 15 }, { wch: 15 }, { wch: 18 }, { wch: 16 }, { wch: 25 }, { wch: 20 },
+        { wch: 15 }, { wch: 20 }, { wch: 20 }, { wch: 16 }, { wch: 25 }, { wch: 20 },
       ];
       const wb = XLSX.utils.book_new();
       XLSX.utils.book_append_sheet(wb, ws, 'Статусы');

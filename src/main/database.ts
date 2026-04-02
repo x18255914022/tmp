@@ -5,28 +5,82 @@ import fs from 'fs';
 
 let db: Database.Database;
 
+type DnaStatus = 'not_started' | 'completed' | 'problem';
+type PcrStatus = 'not_started' | 'completed' | 'pcr_repeat_needed' | 'pcr_repeat_performed' | 'problem';
+type ElectroStatus = 'not_started' | 'completed' | 'electrophoresis_repeat_needed' | 'electrophoresis_repeat_performed' | 'problem';
+type RepeatType =
+  | 'NONE'
+  | 'PCR_REPEAT_NEEDED'
+  | 'PCR_REPEAT_PERFORMED'
+  | 'ELECTROPHORESIS_REPEAT_NEEDED'
+  | 'ELECTROPHORESIS_REPEAT_PERFORMED';
+
 export function getDbPath(): string {
   const userDataPath = app.getPath('userData');
   return path.join(userDataPath, 'salmon-tracker.db');
 }
 
+function ensureColumns() {
+  const columnNames = (table: string) => {
+    const rows = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+    return new Set(rows.map(r => r.name));
+  };
+
+  const projectCols = columnNames('projects');
+  if (!projectCols.has('default_loci_count')) {
+    db.exec("ALTER TABLE projects ADD COLUMN default_loci_count INTEGER DEFAULT 10");
+  }
+
+  const blCols = columnNames('batch_locus');
+  if (!blCols.has('repeat_type')) {
+    db.exec("ALTER TABLE batch_locus ADD COLUMN repeat_type TEXT NOT NULL DEFAULT 'NONE'");
+  }
+}
+
+function deriveRepeatType(pcrStatus: PcrStatus, electrophoresisStatus: ElectroStatus): RepeatType {
+  if (pcrStatus === 'pcr_repeat_needed') return 'PCR_REPEAT_NEEDED';
+  if (pcrStatus === 'pcr_repeat_performed') return 'PCR_REPEAT_PERFORMED';
+  if (electrophoresisStatus === 'electrophoresis_repeat_needed') return 'ELECTROPHORESIS_REPEAT_NEEDED';
+  if (electrophoresisStatus === 'electrophoresis_repeat_performed') return 'ELECTROPHORESIS_REPEAT_PERFORMED';
+  return 'NONE';
+}
+
+function assertValidStatusCombination(dnaStatus: DnaStatus, pcrStatus: PcrStatus, electrophoresisStatus: ElectroStatus) {
+  if (dnaStatus === 'not_started' && (pcrStatus !== 'not_started' || electrophoresisStatus !== 'not_started')) {
+    throw new Error('Некорректная комбинация: ПЦР/электрофорез не могут быть начаты до выполнения или фиксации проблемы ДНК.');
+  }
+
+  if ((pcrStatus === 'pcr_repeat_needed' || pcrStatus === 'pcr_repeat_performed') &&
+      (electrophoresisStatus === 'electrophoresis_repeat_needed' || electrophoresisStatus === 'electrophoresis_repeat_performed')) {
+    throw new Error('Некорректная комбинация: одновременно допустим только один тип повтора (ПЦР ИЛИ электрофорез).');
+  }
+
+  if (pcrStatus === 'not_started' && (electrophoresisStatus === 'completed' || electrophoresisStatus.startsWith('electrophoresis_repeat'))) {
+    throw new Error('Некорректная комбинация: электрофорез не может быть выполнен до ПЦР.');
+  }
+}
+
+function computeReadyForCalculations(pcrStatus: PcrStatus, electrophoresisStatus: ElectroStatus, repeatType: RepeatType): number {
+  return pcrStatus === 'completed' && electrophoresisStatus === 'completed' && repeatType === 'NONE' ? 1 : 0;
+}
+
 export function initDatabase(): Database.Database {
   const dbPath = getDbPath();
   console.log('Database path:', dbPath);
-  
+
   db = new Database(dbPath);
   db.pragma('journal_mode = WAL');
   db.pragma('foreign_keys = ON');
 
-  // Create tables
   db.exec(`
     CREATE TABLE IF NOT EXISTS projects (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       name TEXT NOT NULL,
       description TEXT,
       project_type TEXT,
-      priority TEXT DEFAULT 'средний',
-      default_batch_size INTEGER DEFAULT 48,
+      priority TEXT NOT NULL DEFAULT 'средний' CHECK(priority IN ('низкий', 'средний', 'высокий')),
+      default_loci_count INTEGER NOT NULL DEFAULT 10,
+      default_batch_size INTEGER NOT NULL DEFAULT 48,
       created_at TEXT NOT NULL
     );
 
@@ -37,7 +91,8 @@ export function initDatabase(): Database.Database {
       planned_specimen_count INTEGER DEFAULT 48,
       actual_specimen_count INTEGER,
       notes TEXT,
-      created_at TEXT NOT NULL
+      created_at TEXT NOT NULL,
+      UNIQUE(project_id, batch_code)
     );
 
     CREATE TABLE IF NOT EXISTS locus_reference (
@@ -55,10 +110,11 @@ export function initDatabase(): Database.Database {
       locus_id INTEGER NOT NULL REFERENCES locus_reference(id),
       annealing_temp_override TEXT,
       electrophoresis_time_override TEXT,
-      dna_status TEXT NOT NULL DEFAULT 'not_started',
-      pcr_status TEXT NOT NULL DEFAULT 'not_started',
-      electrophoresis_status TEXT NOT NULL DEFAULT 'not_started',
-      ready_for_calculations INTEGER NOT NULL DEFAULT 0,
+      dna_status TEXT NOT NULL DEFAULT 'not_started' CHECK(dna_status IN ('not_started', 'completed', 'problem')),
+      pcr_status TEXT NOT NULL DEFAULT 'not_started' CHECK(pcr_status IN ('not_started', 'completed', 'pcr_repeat_needed', 'pcr_repeat_performed', 'problem')),
+      electrophoresis_status TEXT NOT NULL DEFAULT 'not_started' CHECK(electrophoresis_status IN ('not_started', 'completed', 'electrophoresis_repeat_needed', 'electrophoresis_repeat_performed', 'problem')),
+      repeat_type TEXT NOT NULL DEFAULT 'NONE' CHECK(repeat_type IN ('NONE', 'PCR_REPEAT_NEEDED', 'PCR_REPEAT_PERFORMED', 'ELECTROPHORESIS_REPEAT_NEEDED', 'ELECTROPHORESIS_REPEAT_PERFORMED')),
+      ready_for_calculations INTEGER NOT NULL DEFAULT 0 CHECK(ready_for_calculations IN (0, 1)),
       notes TEXT,
       updated_at TEXT,
       UNIQUE(sample_group_id, locus_id)
@@ -76,8 +132,10 @@ export function initDatabase(): Database.Database {
     );
   `);
 
+  ensureColumns();
+
   // Seed locus reference if empty
-  const count = db.prepare('SELECT COUNT(*) as cnt FROM locus_reference').get() as any;
+  const count = db.prepare('SELECT COUNT(*) as cnt FROM locus_reference').get() as { cnt: number };
   if (count.cnt === 0) {
     const insert = db.prepare(
       'INSERT INTO locus_reference (locus_code, annealing_temp, electrophoresis_time) VALUES (?, ?, ?)'
@@ -95,9 +153,7 @@ export function initDatabase(): Database.Database {
       ['One103', '56–57 °C', '2 ч 5 мин'],
     ];
     const insertMany = db.transaction((rows: string[][]) => {
-      for (const row of rows) {
-        insert.run(row[0], row[1], row[2]);
-      }
+      for (const row of rows) insert.run(row[0], row[1], row[2]);
     });
     insertMany(loci);
   }
@@ -116,7 +172,7 @@ export function getAllProjects() {
       (SELECT COUNT(*) FROM sample_groups sg WHERE sg.project_id = p.id) as batch_count,
       (SELECT COUNT(*) FROM batch_locus bl WHERE bl.project_id = p.id) as total_bl,
       (SELECT COUNT(*) FROM batch_locus bl WHERE bl.project_id = p.id AND bl.ready_for_calculations = 1) as ready_bl,
-      (SELECT COUNT(*) FROM batch_locus bl WHERE bl.project_id = p.id AND (bl.pcr_status = 'pcr_repeat_needed' OR bl.electrophoresis_status = 'electrophoresis_repeat_needed' OR bl.dna_status = 'problem' OR bl.pcr_status = 'problem' OR bl.electrophoresis_status = 'problem')) as problem_bl
+      (SELECT COUNT(*) FROM batch_locus bl WHERE bl.project_id = p.id AND (bl.repeat_type != 'NONE' OR bl.dna_status = 'problem' OR bl.pcr_status = 'problem' OR bl.electrophoresis_status = 'problem')) as problem_bl
     FROM projects p ORDER BY p.created_at DESC
   `).all();
 }
@@ -125,13 +181,13 @@ export function getProject(id: number) {
   return getDb().prepare('SELECT * FROM projects WHERE id = ?').get(id);
 }
 
-export function createProject(data: { name: string; description?: string; projectType?: string; priority?: string; defaultBatchSize?: number }) {
+export function createProject(data: { name: string; description?: string; projectType?: string; priority?: string; defaultBatchSize?: number; defaultLociCount?: number }) {
   return getDb().prepare(
-    'INSERT INTO projects (name, description, project_type, priority, default_batch_size, created_at) VALUES (?, ?, ?, ?, ?, ?)'
-  ).run(data.name, data.description || null, data.projectType || null, data.priority || 'средний', data.defaultBatchSize || 48, new Date().toISOString());
+    'INSERT INTO projects (name, description, project_type, priority, default_loci_count, default_batch_size, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)'
+  ).run(data.name, data.description || null, data.projectType || null, data.priority || 'средний', data.defaultLociCount || 10, data.defaultBatchSize || 48, new Date().toISOString());
 }
 
-export function updateProject(id: number, data: { name?: string; description?: string; projectType?: string; priority?: string; defaultBatchSize?: number }) {
+export function updateProject(id: number, data: { name?: string; description?: string; projectType?: string; priority?: string; defaultBatchSize?: number; defaultLociCount?: number }) {
   const fields: string[] = [];
   const values: any[] = [];
   if (data.name !== undefined) { fields.push('name = ?'); values.push(data.name); }
@@ -139,6 +195,7 @@ export function updateProject(id: number, data: { name?: string; description?: s
   if (data.projectType !== undefined) { fields.push('project_type = ?'); values.push(data.projectType); }
   if (data.priority !== undefined) { fields.push('priority = ?'); values.push(data.priority); }
   if (data.defaultBatchSize !== undefined) { fields.push('default_batch_size = ?'); values.push(data.defaultBatchSize); }
+  if (data.defaultLociCount !== undefined) { fields.push('default_loci_count = ?'); values.push(data.defaultLociCount); }
   if (fields.length === 0) return;
   values.push(id);
   getDb().prepare(`UPDATE projects SET ${fields.join(', ')} WHERE id = ?`).run(...values);
@@ -157,7 +214,7 @@ export function getSampleGroupsByProject(projectId: number) {
       (SELECT COUNT(*) FROM batch_locus bl WHERE bl.sample_group_id = sg.id AND bl.dna_status = 'not_started' AND bl.pcr_status = 'not_started' AND bl.electrophoresis_status = 'not_started') as not_started_loci,
       (SELECT COUNT(*) FROM batch_locus bl WHERE bl.sample_group_id = sg.id AND bl.pcr_status = 'pcr_repeat_needed') as pcr_repeat_loci,
       (SELECT COUNT(*) FROM batch_locus bl WHERE bl.sample_group_id = sg.id AND bl.electrophoresis_status = 'electrophoresis_repeat_needed') as electro_repeat_loci,
-      (SELECT COUNT(*) FROM batch_locus bl WHERE bl.sample_group_id = sg.id AND (bl.dna_status = 'problem' OR bl.pcr_status = 'problem' OR bl.electrophoresis_status = 'problem')) as problem_loci
+      (SELECT COUNT(*) FROM batch_locus bl WHERE bl.sample_group_id = sg.id AND (bl.repeat_type != 'NONE' OR bl.dna_status = 'problem' OR bl.pcr_status = 'problem' OR bl.electrophoresis_status = 'problem')) as problem_loci
     FROM sample_groups sg WHERE sg.project_id = ? ORDER BY sg.created_at DESC
   `).all(projectId);
 }
@@ -171,16 +228,13 @@ export function createSampleGroup(data: { projectId: number; batchCode: string; 
     'INSERT INTO sample_groups (project_id, batch_code, planned_specimen_count, actual_specimen_count, notes, created_at) VALUES (?, ?, ?, ?, ?, ?)'
   ).run(data.projectId, data.batchCode, data.plannedSpecimenCount || 48, data.actualSpecimenCount || null, data.notes || null, new Date().toISOString());
 
-  // Auto-create batch_locus for all loci in reference
-  const loci = getDb().prepare('SELECT id FROM locus_reference ORDER BY id').all() as any[];
+  const loci = getDb().prepare('SELECT id FROM locus_reference ORDER BY id').all() as Array<{ id: number }>;
   const insertBl = getDb().prepare(
-    'INSERT INTO batch_locus (project_id, sample_group_id, locus_id, dna_status, pcr_status, electrophoresis_status, ready_for_calculations, updated_at) VALUES (?, ?, ?, \'not_started\', \'not_started\', \'not_started\', 0, ?)'
+    "INSERT INTO batch_locus (project_id, sample_group_id, locus_id, dna_status, pcr_status, electrophoresis_status, repeat_type, ready_for_calculations, updated_at) VALUES (?, ?, ?, 'not_started', 'not_started', 'not_started', 'NONE', 0, ?)"
   );
   const now = new Date().toISOString();
   const insertAll = getDb().transaction(() => {
-    for (const locus of loci) {
-      insertBl.run(data.projectId, result.lastInsertRowid, locus.id, now);
-    }
+    for (const locus of loci) insertBl.run(data.projectId, result.lastInsertRowid, locus.id, now);
   });
   insertAll();
 
@@ -215,13 +269,30 @@ export function getBatchLociByGroup(sampleGroupId: number) {
 }
 
 export function updateBatchLocus(id: number, data: {
-  dnaStatus?: string;
-  pcrStatus?: string;
-  electrophoresisStatus?: string;
+  dnaStatus?: DnaStatus;
+  pcrStatus?: PcrStatus;
+  electrophoresisStatus?: ElectroStatus;
   annealingTempOverride?: string;
   electrophoresisTimeOverride?: string;
   notes?: string;
 }) {
+  const current = getDb().prepare('SELECT dna_status, pcr_status, electrophoresis_status FROM batch_locus WHERE id = ?').get(id) as {
+    dna_status: DnaStatus;
+    pcr_status: PcrStatus;
+    electrophoresis_status: ElectroStatus;
+  } | undefined;
+
+  if (!current) throw new Error('Запись batch×locus не найдена.');
+
+  const nextDna = data.dnaStatus ?? current.dna_status;
+  const nextPcr = data.pcrStatus ?? current.pcr_status;
+  const nextElectro = data.electrophoresisStatus ?? current.electrophoresis_status;
+
+  assertValidStatusCombination(nextDna, nextPcr, nextElectro);
+
+  const repeatType = deriveRepeatType(nextPcr, nextElectro);
+  const readyForCalculations = computeReadyForCalculations(nextPcr, nextElectro, repeatType);
+
   const fields: string[] = [];
   const values: any[] = [];
   if (data.dnaStatus !== undefined) { fields.push('dna_status = ?'); values.push(data.dnaStatus); }
@@ -230,19 +301,16 @@ export function updateBatchLocus(id: number, data: {
   if (data.annealingTempOverride !== undefined) { fields.push('annealing_temp_override = ?'); values.push(data.annealingTempOverride || null); }
   if (data.electrophoresisTimeOverride !== undefined) { fields.push('electrophoresis_time_override = ?'); values.push(data.electrophoresisTimeOverride || null); }
   if (data.notes !== undefined) { fields.push('notes = ?'); values.push(data.notes); }
-  
+
+  fields.push('repeat_type = ?');
+  values.push(repeatType);
+  fields.push('ready_for_calculations = ?');
+  values.push(readyForCalculations);
   fields.push('updated_at = ?');
   values.push(new Date().toISOString());
-  
+
   values.push(id);
   getDb().prepare(`UPDATE batch_locus SET ${fields.join(', ')} WHERE id = ?`).run(...values);
-
-  // Recompute ready_for_calculations
-  const row = getDb().prepare('SELECT dna_status, pcr_status, electrophoresis_status FROM batch_locus WHERE id = ?').get(id) as any;
-  if (row) {
-    const ready = (row.dna_status === 'completed' && row.pcr_status === 'completed' && row.electrophoresis_status === 'completed') ? 1 : 0;
-    getDb().prepare('UPDATE batch_locus SET ready_for_calculations = ? WHERE id = ?').run(ready, id);
-  }
 }
 
 // ─── Locus Reference ───
@@ -296,31 +364,30 @@ export function deleteRerunNote(id: number) {
 
 // ─── Dashboard stats ───
 export function getDashboardStats() {
-  const db = getDb();
-  const totalProjects = (db.prepare('SELECT COUNT(*) as cnt FROM projects').get() as any).cnt;
-  const totalBatches = (db.prepare('SELECT COUNT(*) as cnt FROM sample_groups').get() as any).cnt;
-  const totalBl = (db.prepare('SELECT COUNT(*) as cnt FROM batch_locus').get() as any).cnt;
-  const dnaCompleted = (db.prepare("SELECT COUNT(*) as cnt FROM batch_locus WHERE dna_status = 'completed'").get() as any).cnt;
-  const pcrCompleted = (db.prepare("SELECT COUNT(*) as cnt FROM batch_locus WHERE pcr_status = 'completed'").get() as any).cnt;
-  const pcrRepeat = (db.prepare("SELECT COUNT(*) as cnt FROM batch_locus WHERE pcr_status = 'pcr_repeat_needed'").get() as any).cnt;
-  const electroCompleted = (db.prepare("SELECT COUNT(*) as cnt FROM batch_locus WHERE electrophoresis_status = 'completed'").get() as any).cnt;
-  const electroRepeat = (db.prepare("SELECT COUNT(*) as cnt FROM batch_locus WHERE electrophoresis_status = 'electrophoresis_repeat_needed'").get() as any).cnt;
-  const ready = (db.prepare("SELECT COUNT(*) as cnt FROM batch_locus WHERE ready_for_calculations = 1").get() as any).cnt;
-  const problems = (db.prepare("SELECT COUNT(*) as cnt FROM batch_locus WHERE dna_status = 'problem' OR pcr_status = 'problem' OR electrophoresis_status = 'problem'").get() as any).cnt;
+  const database = getDb();
+  const totalProjects = (database.prepare('SELECT COUNT(*) as cnt FROM projects').get() as any).cnt;
+  const totalBatches = (database.prepare('SELECT COUNT(*) as cnt FROM sample_groups').get() as any).cnt;
+  const totalBl = (database.prepare('SELECT COUNT(*) as cnt FROM batch_locus').get() as any).cnt;
 
-  // Problem batch×locus list
-  const problemList = db.prepare(`
-    SELECT bl.id, p.name as project_name, sg.batch_code, lr.locus_code, bl.dna_status, bl.pcr_status, bl.electrophoresis_status
+  const dnaCompleted = (database.prepare("SELECT COUNT(*) as cnt FROM batch_locus WHERE dna_status = 'completed'").get() as any).cnt;
+  const pcrCompleted = (database.prepare("SELECT COUNT(*) as cnt FROM batch_locus WHERE pcr_status = 'completed'").get() as any).cnt;
+  const pcrRepeat = (database.prepare("SELECT COUNT(*) as cnt FROM batch_locus WHERE pcr_status = 'pcr_repeat_needed'").get() as any).cnt;
+  const electroCompleted = (database.prepare("SELECT COUNT(*) as cnt FROM batch_locus WHERE electrophoresis_status = 'completed'").get() as any).cnt;
+  const electroRepeat = (database.prepare("SELECT COUNT(*) as cnt FROM batch_locus WHERE electrophoresis_status = 'electrophoresis_repeat_needed'").get() as any).cnt;
+  const ready = (database.prepare("SELECT COUNT(*) as cnt FROM batch_locus WHERE ready_for_calculations = 1").get() as any).cnt;
+  const problems = (database.prepare("SELECT COUNT(*) as cnt FROM batch_locus WHERE repeat_type != 'NONE' OR dna_status = 'problem' OR pcr_status = 'problem' OR electrophoresis_status = 'problem'").get() as any).cnt;
+
+  const problemList = database.prepare(`
+    SELECT bl.id, p.name as project_name, sg.batch_code, lr.locus_code, bl.dna_status, bl.pcr_status, bl.electrophoresis_status, bl.repeat_type
     FROM batch_locus bl
     JOIN projects p ON p.id = bl.project_id
     JOIN sample_groups sg ON sg.id = bl.sample_group_id
     JOIN locus_reference lr ON lr.id = bl.locus_id
-    WHERE bl.pcr_status = 'pcr_repeat_needed' OR bl.electrophoresis_status = 'electrophoresis_repeat_needed' OR bl.dna_status = 'problem' OR bl.pcr_status = 'problem' OR bl.electrophoresis_status = 'problem'
+    WHERE bl.repeat_type != 'NONE' OR bl.dna_status = 'problem' OR bl.pcr_status = 'problem' OR bl.electrophoresis_status = 'problem'
     ORDER BY p.name, sg.batch_code
   `).all();
 
-  // Ready list
-  const readyList = db.prepare(`
+  const readyList = database.prepare(`
     SELECT bl.id, p.name as project_name, sg.batch_code, lr.locus_code
     FROM batch_locus bl
     JOIN projects p ON p.id = bl.project_id
@@ -330,11 +397,22 @@ export function getDashboardStats() {
     ORDER BY p.name, sg.batch_code
   `).all();
 
+  const partialCount = totalBl - ready - problems;
+
   return {
-    totalProjects, totalBatches, totalBl,
-    dnaCompleted, pcrCompleted, pcrRepeat,
-    electroCompleted, electroRepeat, ready, problems,
-    problemList, readyList,
+    totalProjects,
+    totalBatches,
+    totalBl,
+    dnaCompleted,
+    pcrCompleted,
+    pcrRepeat,
+    electroCompleted,
+    electroRepeat,
+    ready,
+    problems,
+    partialCount,
+    problemList,
+    readyList,
   };
 }
 
@@ -345,7 +423,7 @@ export function getExportData() {
       COALESCE(bl.annealing_temp_override, lr.annealing_temp) as annealing_temp,
       COALESCE(bl.electrophoresis_time_override, lr.electrophoresis_time) as electrophoresis_time,
       bl.dna_status, bl.pcr_status, bl.electrophoresis_status,
-      bl.ready_for_calculations, bl.notes, bl.updated_at
+      bl.repeat_type, bl.ready_for_calculations, bl.notes, bl.updated_at
     FROM batch_locus bl
     JOIN projects p ON p.id = bl.project_id
     JOIN sample_groups sg ON sg.id = bl.sample_group_id
@@ -362,9 +440,7 @@ export function backupDatabase(destPath: string) {
 
 export function restoreDatabase(srcPath: string) {
   const destPath = getDbPath();
-  // Close current connection
   getDb().close();
   fs.copyFileSync(srcPath, destPath);
-  // Reinitialize
   return initDatabase();
 }

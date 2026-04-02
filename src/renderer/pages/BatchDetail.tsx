@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { ArrowLeft, CheckCircle2, XCircle } from 'lucide-react';
 import StatusSelect from '../components/StatusSelect';
+import StatusBadge from '../components/StatusBadge';
 
 interface Props {
   groupId: number;
@@ -9,10 +10,11 @@ interface Props {
   onRefresh: () => void;
 }
 
-export default function BatchDetail({ groupId, projectId, onNavigate, onRefresh }: Props) {
+export default function BatchDetail({ groupId, projectId, onNavigate }: Props) {
   const [group, setGroup] = useState<any>(null);
   const [loci, setLoci] = useState<any[]>([]);
   const [saving, setSaving] = useState<number | null>(null);
+  const [error, setError] = useState('');
 
   const load = async () => {
     const g = await window.api.getGroup(groupId);
@@ -25,9 +27,15 @@ export default function BatchDetail({ groupId, projectId, onNavigate, onRefresh 
 
   const handleStatusChange = async (blId: number, field: string, value: string) => {
     setSaving(blId);
-    await window.api.updateBatchLocus(blId, { [field]: value });
-    await load();
-    setSaving(null);
+    setError('');
+    try {
+      await window.api.updateBatchLocus(blId, { [field]: value });
+      await load();
+    } catch (err: any) {
+      setError(err?.message || 'Не удалось обновить статус.');
+    } finally {
+      setSaving(null);
+    }
   };
 
   const handleNotesChange = async (blId: number, notes: string) => {
@@ -42,7 +50,6 @@ export default function BatchDetail({ groupId, projectId, onNavigate, onRefresh 
 
   return (
     <div className="max-w-6xl space-y-4">
-      {/* Header */}
       <div className="flex items-center gap-3">
         <button
           onClick={() => onNavigate({ page: 'project', projectId })}
@@ -73,7 +80,8 @@ export default function BatchDetail({ groupId, projectId, onNavigate, onRefresh 
         <p className="text-xs text-muted-foreground bg-accent/30 rounded px-3 py-1.5">{group.notes}</p>
       )}
 
-      {/* Loci table */}
+      {error && <div className="text-xs text-red-500 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-900 rounded px-3 py-2">{error}</div>}
+
       <div className="bg-card rounded-lg border border-border overflow-hidden">
         <table className="w-full text-sm">
           <thead>
@@ -84,6 +92,7 @@ export default function BatchDetail({ groupId, projectId, onNavigate, onRefresh 
               <th className="text-left px-3 py-2 text-xs text-muted-foreground font-medium w-36">ДНК</th>
               <th className="text-left px-3 py-2 text-xs text-muted-foreground font-medium w-36">ПЦР</th>
               <th className="text-left px-3 py-2 text-xs text-muted-foreground font-medium w-36">Электрофорез</th>
+              <th className="text-left px-3 py-2 text-xs text-muted-foreground font-medium w-36">Тип повтора</th>
               <th className="text-center px-3 py-2 text-xs text-muted-foreground font-medium w-16">Готово</th>
               <th className="text-left px-3 py-2 text-xs text-muted-foreground font-medium">Прим.</th>
             </tr>
@@ -92,7 +101,7 @@ export default function BatchDetail({ groupId, projectId, onNavigate, onRefresh 
             {loci.map((bl: any) => {
               const isReady = bl.ready_for_calculations === 1;
               const hasProblem = bl.dna_status === 'problem' || bl.pcr_status === 'problem' || bl.electrophoresis_status === 'problem';
-              const hasRepeat = bl.pcr_status === 'pcr_repeat_needed' || bl.electrophoresis_status === 'electrophoresis_repeat_needed';
+              const hasRepeat = bl.repeat_type && bl.repeat_type !== 'NONE';
               const rowBg = isReady
                 ? 'bg-emerald-50/50 dark:bg-emerald-900/10'
                 : hasProblem
@@ -102,7 +111,7 @@ export default function BatchDetail({ groupId, projectId, onNavigate, onRefresh 
                 : '';
 
               return (
-                <tr key={bl.id} className={`border-b border-border/50 last:border-0 ${rowBg}`}>
+                <tr key={bl.id} className={`border-b border-border/50 last:border-0 ${rowBg} ${saving === bl.id ? 'opacity-60' : ''}`}>
                   <td className="px-3 py-2 font-mono text-xs font-medium">{bl.locus_code}</td>
                   <td className="px-3 py-2 text-xs text-muted-foreground">{bl.annealing_temp_override || bl.ref_temp || '—'}</td>
                   <td className="px-3 py-2 text-xs text-muted-foreground">{bl.electrophoresis_time_override || bl.ref_time || '—'}</td>
@@ -126,6 +135,9 @@ export default function BatchDetail({ groupId, projectId, onNavigate, onRefresh 
                       type="electro"
                       onChange={v => handleStatusChange(bl.id, 'electrophoresisStatus', v)}
                     />
+                  </td>
+                  <td className="px-3 py-2">
+                    <StatusBadge status={bl.repeat_type || 'NONE'} type="repeat" />
                   </td>
                   <td className="px-3 py-2 text-center">
                     {isReady
@@ -152,12 +164,13 @@ export default function BatchDetail({ groupId, projectId, onNavigate, onRefresh 
         </table>
       </div>
 
-      {/* Summary at bottom */}
       <div className="flex gap-4 text-xs text-muted-foreground">
         <span>Всего локусов: {totalCount}</span>
         <span className="text-emerald-500">Готово: {readyCount}</span>
-        <span className="text-amber-500">Повтор ПЦР: {loci.filter(l => l.pcr_status === 'pcr_repeat_needed').length}</span>
-        <span className="text-orange-500">Повтор фореза: {loci.filter(l => l.electrophoresis_status === 'electrophoresis_repeat_needed').length}</span>
+        <span className="text-amber-500">ПЦР: нужен повтор {loci.filter(l => l.pcr_status === 'pcr_repeat_needed').length}</span>
+        <span className="text-yellow-600">ПЦР: повтор выполнен {loci.filter(l => l.pcr_status === 'pcr_repeat_performed').length}</span>
+        <span className="text-orange-500">Форез: нужен повтор {loci.filter(l => l.electrophoresis_status === 'electrophoresis_repeat_needed').length}</span>
+        <span className="text-orange-700">Форез: повтор выполнен {loci.filter(l => l.electrophoresis_status === 'electrophoresis_repeat_performed').length}</span>
         <span className="text-red-500">Проблемы: {loci.filter(l => l.dna_status === 'problem' || l.pcr_status === 'problem' || l.electrophoresis_status === 'problem').length}</span>
       </div>
     </div>
